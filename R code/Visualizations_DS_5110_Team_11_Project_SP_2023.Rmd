@@ -1,0 +1,547 @@
+---
+title: "Access WB/GBD database and load dataframes"
+---
+
+Run this chunk to connect to database & build all data frames:
+```{r}
+library("RSQLite")
+library(tidyr)
+library(dplyr)
+library(maps)
+library(ggplot2)
+library(showtext)
+library(stringr)
+library(tidyverse)
+
+db.conn <- dbConnect(RSQLite::SQLite(), dbname="worldHealth_v3.db")
+
+# Full list of countries
+health.full<- dbGetQuery(db.conn,   
+"SELECT c.Cause, ye.Year, l.Location, y.Data, l.Region, l.G20, l.IncomeLevel FROM yearlyGBD AS y
+JOIN locations AS l ON y.Location = l.lid
+JOIN causes AS c ON y.Cause = c.cid
+JOIN years AS ye ON y.Year = ye.yid")
+
+#Get econ data for countries w/ 10% or less data missing
+econ.10p<- dbGetQuery(db.conn,   
+"SELECT ye.year, y.Data, l.location, s.Series , l.Region, l.G20, l.IncomeLevel FROM yearlyWB AS y
+JOIN locations AS l ON y.Location = l.lid
+JOIN years AS ye ON y.Year = ye.yid
+JOIN series as s ON y.Series = s.sid")
+
+# Get health data for countries w/ 10% or less data missing
+health.10p <- dbGetQuery(db.conn,   
+"SELECT c.Cause, ye.Year, l.Location, y.Data, l.Region, l.G20, l.IncomeLevel FROM yearlyGBD AS y
+JOIN locations AS l ON y.Location = l.lid
+JOIN causes AS c ON y.Cause = c.cid
+JOIN years AS ye ON y.Year = ye.yid")
+health.10p <- health.10p[health.10p$Location %in% econ.10p$Location,]
+
+# Pivot econ data
+econ.10p_pivot <- econ.10p %>% 
+  group_by(Year, Location, Series) %>% 
+  slice(1) %>% 
+  pivot_wider(names_from = Series, values_from = Data)
+
+```
+
+
+
+
+
+```{r}
+# 204 countries total:
+health.full
+
+# 172 countries total:
+## GBD data for countries with less than 10% of data missing
+health.10p
+
+## World Bank data for countries with less than 10% of data missing
+econ.10p
+
+## World Bank data for countries with less than 10% of data missing (pivoted)
+
+econ.10p_pivot
+```
+
+```{r}
+health.10p.diabetes <- read_csv("../Datasets/diabetes_2000_2019.csv")
+health.10p.diabetes <- health.10p.diabetes[health.10p.diabetes$location %in% econ.10p$Location,]
+```
+
+```{r fig.width = 10}
+df <- as.data.frame(
+  health.10p.diabetes  %>%
+    filter(measure == "Prevalence") %>%
+    group_by(year) %>%
+    summarise(
+      Avg = mean(val)
+    )
+)
+
+ggplot(df,
+       aes(x = year, y = Avg)) +
+    geom_line() + geom_point(color="red") + 
+  scale_x_continuous(breaks=2000:2019) + 
+  labs(title = "Avg. Prevalence Percent of Diabetes and Kidney diseases by Year",
+       x = "Year", y = "Avg. Prevalence Percentage") +
+  theme(title = element_text(size=18), 
+        axis.text = element_text(size=12),
+        axis.title = element_text(size=16),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+ggsave("../Visualizations/trendprevalence.png", width = 8, height = 6, dpi = 150, units = "in", device='png')
+```
+
+```{r fig.width = 10}
+df <- as.data.frame(
+  health.10p.diabetes  %>%
+    filter(measure == "Incidence") %>%
+    group_by(year) %>%
+    summarise(
+      Avg = mean(val)
+    )
+)
+
+ggplot(df,
+       aes(x = year, y = Avg)) +
+    geom_line() + geom_point(color="red") + 
+  scale_x_continuous(breaks=2000:2019) + 
+  labs(title = "Avg. Incidence Percent of Diabetes and Kidney diseases by Year",
+       x = "Year", y = "Avg. Incidence Percentage") +
+  theme(title = element_text(size=18), 
+        axis.text = element_text(size=12),
+        axis.title = element_text(size=16),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+ggsave("../Visualizations/trendincidence.png", width = 8, height = 6, dpi = 150, units = "in", device='png')
+```
+
+```{r fig.width = 10}
+df <- as.data.frame(
+  health.10p.diabetes  %>%
+    filter(measure == "Deaths") %>%
+    group_by(year) %>%
+    summarise(
+      Avg = mean(val)
+    )
+)
+
+ggplot(df, aes(x = year, y = Avg)) + 
+  geom_line() + geom_point(color="red") + 
+  scale_x_continuous(breaks=2000:2019) +
+  labs(title = "Avg. Death Percent of Diabetes and Kidney diseases by Year",
+       x = "Year", y = "Avg. Death Percentage") +
+  theme(title = element_text(size=18), 
+        axis.text = element_text(size=12),
+        axis.title = element_text(size=16),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+ggsave("../Visualizations/trenddeaths.png", width = 8, height = 6, dpi = 150, units = "in", device='png')
+```
+
+```{r}
+world_map <- map_data("world")
+
+diabetes.rate <- health.full[(health.full$Cause == "Diabetes and kidney diseases, Prevalence") & 
+                               (health.full$Year == 2015),]
+
+diabetes.rate <- diabetes.rate %>% 
+  select(Location, Data) %>%
+  rename(region = Location) %>%
+  mutate(
+    region = case_when(
+      region == "United States" ~ "USA", 
+      region == "United Kingdom" ~ "UK",
+      region == "Russian Federation" ~ "Russia",
+      region == "Lao PDR" ~ "Laos",
+      region == "Congo" ~ "Democratic Republic of the Congo",
+      region == "Czechia" ~ "Czech Republic",
+      TRUE ~ region)
+    )
+
+diabetes.rate.map <- left_join(diabetes.rate, world_map, by = "region")
+
+ggplot(diabetes.rate.map, aes(long, lat, group = group)) +
+  geom_polygon(aes(fill=Data)) +
+  scale_fill_viridis_c() +
+  labs(title="Diabetes and kidney diseases, Prevalence Worldwide in 2015", fill ="Prevalence rate\n(in percent)") +
+  theme(
+    plot.title = element_text(size = 18, hjust = 0.5), 
+    legend.title = element_text(size = 16, hjust = 0.5),
+    text = element_text(size = 16))
+ggsave("../Visualizations/mapprevalence.png", width = 10, height = 6, dpi = 150, units = "in", device='png')
+```
+
+
+```{r fig.width = 10}
+diabetes.rate.2000 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Prevalence") & 
+                               (health.10p$Year == 2000),]
+diabetes.rate.2005 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Prevalence") & 
+                               (health.10p$Year == 2005),]
+diabetes.rate.2010 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Prevalence") & 
+                               (health.10p$Year == 2010),]
+diabetes.rate.2015 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Prevalence") & 
+                               (health.10p$Year == 2015),]
+
+df1 <- head(arrange(diabetes.rate.2000, desc(Data)), 5)
+df2 <- head(arrange(diabetes.rate.2005, desc(Data)), 5)
+df3 <- head(arrange(diabetes.rate.2010, desc(Data)), 5)
+df4 <- head(arrange(diabetes.rate.2015, desc(Data)), 5)
+
+df_all <- rbind(df1, df2, df3, df4)
+df_all$year <- rep(c("2000", "2005", "2010", "2015"), each = 5)
+
+ggplot(data = df_all, aes(x = year, y = Data, fill = Location)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Countries having top 5 prevalence rates by year",
+       x = "Year",
+       y = "Prevalence rate",
+       fill = "Country") +
+  theme(title = element_text(size=18), 
+        axis.text = element_text(size=12),
+        axis.title = element_text(size=16),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+ggsave("../Visualizations/top5prevalence.png", width = 10, height = 8, dpi = 150, units = "in", device='png')
+```
+
+```{r}
+world_map <- map_data("world")
+
+diabetes.rate <- health.full[(health.full$Cause == "Diabetes and kidney diseases, Incidence") & 
+                               (health.full$Year == 2015),]
+
+diabetes.rate <- diabetes.rate %>% 
+  select(Location, Data) %>%
+  rename(region = Location) %>%
+  mutate(
+    region = case_when(
+      region == "United States" ~ "USA", 
+      region == "United Kingdom" ~ "UK",
+      region == "Russian Federation" ~ "Russia",
+      region == "Lao PDR" ~ "Laos",
+      region == "Congo" ~ "Democratic Republic of the Congo",
+      region == "Czechia" ~ "Czech Republic",
+      TRUE ~ region)
+    )
+
+diabetes.rate.map <- left_join(diabetes.rate, world_map, by = "region")
+
+ggplot(diabetes.rate.map, aes(long, lat, group = group)) +
+  geom_polygon(aes(fill=Data)) +
+  scale_fill_viridis_c() +
+  labs(title="Diabetes and kidney diseases, Incidence Worldwide in 2015", fill ="Incidence rate\n(in percent)") +
+  theme(
+    plot.title = element_text(size = 18, hjust = 0.5), 
+    legend.title = element_text(size = 16, hjust = 0.5),
+    text = element_text(size = 16))
+ggsave("../Visualizations/mapincidence.png", width = 10, height = 6, dpi = 150, units = "in", device='png')
+```
+
+```{r fig.width = 10}
+diabetes.rate.2000 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Incidence") & 
+                               (health.10p$Year == 2000),]
+diabetes.rate.2005 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Incidence") & 
+                               (health.10p$Year == 2005),]
+diabetes.rate.2010 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Incidence") & 
+                               (health.10p$Year == 2010),]
+diabetes.rate.2015 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Incidence") & 
+                               (health.10p$Year == 2015),]
+
+df1 <- head(arrange(diabetes.rate.2000, desc(Data)), 5)
+df2 <- head(arrange(diabetes.rate.2005, desc(Data)), 5)
+df3 <- head(arrange(diabetes.rate.2010, desc(Data)), 5)
+df4 <- head(arrange(diabetes.rate.2015, desc(Data)), 5)
+
+df_all <- rbind(df1, df2, df3, df4)
+df_all$year <- rep(c("2000", "2005", "2010", "2015"), each = 5)
+
+ggplot(data = df_all, aes(x = year, y = Data, fill = Location)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Countries having top 5 incidence rates by year",
+       x = "Year",
+       y = "Incidence rate",
+       fill = "Country") +
+  theme(title = element_text(size=18), 
+        axis.text = element_text(size=12),
+        axis.title = element_text(size=16),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+ggsave("../Visualizations/top5incidence.png", width = 10, height = 8, dpi = 150, units = "in", device='png')
+```
+
+```{r}
+world_map <- map_data("world")
+
+diabetes.rate <- health.full[(health.full$Cause == "Diabetes and kidney diseases, Deaths") & 
+                               (health.full$Year == 2015),]
+
+diabetes.rate <- diabetes.rate %>% 
+  select(Location, Data) %>%
+  rename(region = Location) %>%
+  mutate(
+    region = case_when(
+      region == "United States" ~ "USA", 
+      region == "United Kingdom" ~ "UK",
+      region == "Russian Federation" ~ "Russia",
+      region == "Lao PDR" ~ "Laos",
+      region == "Congo" ~ "Democratic Republic of the Congo",
+      region == "Czechia" ~ "Czech Republic",
+      TRUE ~ region)
+    )
+
+diabetes.rate.map <- left_join(diabetes.rate, world_map, by = "region")
+
+ggplot(diabetes.rate.map, aes(long, lat, group = group)) +
+  geom_polygon(aes(fill=Data)) +
+  scale_fill_viridis_c() +
+  labs(title="Diabetes and kidney diseases, Deaths in 2015", fill ="Death rate\n(in percent)") +
+  theme(
+    plot.title = element_text(size = 18, hjust = 0.5), 
+    legend.title = element_text(size = 16, hjust = 0.5),
+    text = element_text(size = 16))
+ggsave("../Visualizations/mapdeaths.png", width = 10, height = 6, dpi = 150, units = "in", device='png')
+```
+
+```{r fig.width = 10}
+diabetes.rate.2000 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Deaths") & 
+                               (health.10p$Year == 2000),]
+diabetes.rate.2005 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Deaths") & 
+                               (health.10p$Year == 2005),]
+diabetes.rate.2010 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Deaths") & 
+                               (health.10p$Year == 2010),]
+diabetes.rate.2015 <- health.10p[(health.10p$Cause == "Diabetes and kidney diseases, Deaths") & 
+                               (health.10p$Year == 2015),]
+
+df1 <- head(arrange(diabetes.rate.2000, desc(Data)), 5)
+df2 <- head(arrange(diabetes.rate.2005, desc(Data)), 5)
+df3 <- head(arrange(diabetes.rate.2010, desc(Data)), 5)
+df4 <- head(arrange(diabetes.rate.2015, desc(Data)), 5)
+
+df_all <- rbind(df1, df2, df3, df4)
+df_all$year <- rep(c("2000", "2005", "2010", "2015"), each = 5)
+
+ggplot(data = df_all, aes(x = year, y = Data, fill = Location)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Countries having top 5 deaths rates by year",
+       x = "Year",
+       y = "Death rate",
+       fill = "Country") +
+  theme(title = element_text(size=18), 
+        axis.text = element_text(size=12),
+        axis.title = element_text(size=16),
+        legend.title = element_text(size=16), 
+        legend.text = element_text(size=14))
+ggsave("../Visualizations/top5deaths.png", width = 10, height = 8, dpi = 150, units = "in", device='png')
+```
+
+```{r}
+
+getPlotData <- function(diabetes, gdp){
+  countries <- unique(diabetes$Location);
+  years = unique(diabetes$Year);
+  diabetes.gdp <- tibble(Location = character(), Year = numeric(), Death = numeric(), Series = character())
+  for (year in years){
+    for (country in countries){
+      temp <- tibble(Location = country, 
+                     Year = year, 
+                     
+                     Death = diabetes$Data[(diabetes$Year == year & 
+                                             diabetes$Location == country)],
+                     Series = as.numeric(gdp$Data[(gdp$Year == year & 
+                                             gdp$Location == country)]),
+                     Region = diabetes$Region[(gdp$Year == year & 
+                                             gdp$Location == country)],
+                     G20 = diabetes$G20[(gdp$Year == year & 
+                                             gdp$Location == country)],
+                     IncomeLevel = diabetes$IncomeLevel[(gdp$Year == year & 
+                                             gdp$Location == country)])
+      diabetes.gdp <- rbind(temp, diabetes.gdp)
+      
+    }
+  }
+
+  colnames(diabetes.gdp)[4] <- unique(gdp$Series)
+  colnames(diabetes.gdp)[3] <- unique(diabetes$Cause)
+  diabetes.gdp
+  }
+
+```
+
+
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Deaths",], 
+  econ.10p[econ.10p$Series == "GDP (current US$)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$IncomeLevel != 1,]
+
+ggplot(data = diabetes.gdp, aes(x = as.factor(Year), fill = as.factor(IncomeLevel),
+                                y = `Diabetes and kidney diseases, Deaths`)) + geom_boxplot()
+```
+
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Prevalence",], 
+  econ.10p[econ.10p$Series == "GDP (current US$)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Region != "Other",]
+
+ggplot(data = diabetes.gdp, aes(x = as.factor(Year), fill = as.factor(G20),
+                                y = `Diabetes and kidney diseases, Prevalence`)) + geom_boxplot()
+```
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Deaths",], 
+  econ.10p[econ.10p$Series == "GDP (current US$)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Region != "Other",]
+
+ggplot(data = diabetes.gdp, aes(x = as.factor(Year), fill = as.factor(Region),
+                                y = `Diabetes and kidney diseases, Deaths`)) + geom_boxplot()
+```
+
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Incidence",], 
+  econ.10p[econ.10p$Series == "CO2 emissions (metric tons per capita)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Region != "Other",]
+
+ggplot(data = diabetes.gdp, aes(x = as.factor(Year), fill = as.factor(Region),
+                                y = `Diabetes and kidney diseases, Incidence`)) + geom_boxplot()
+```
+
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Prevalence",], 
+  econ.10p[econ.10p$Series == "CO2 emissions (metric tons per capita)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Region != "Other",]
+
+ggplot(data = diabetes.gdp, aes(x = as.factor(Year), fill = as.factor(Region),
+                                y = `Diabetes and kidney diseases, Prevalence`)) + geom_boxplot()
+```
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Prevalence",], 
+  econ.10p[econ.10p$Series == "CO2 emissions (metric tons per capita)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$IncomeLevel != 1,]
+
+ggplot(data = diabetes.gdp, aes(x = as.factor(Year), fill = as.factor(IncomeLevel),
+                                y = `Diabetes and kidney diseases, Prevalence`)) + geom_boxplot()
+```
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Incidence",], 
+  econ.10p[econ.10p$Series == "CO2 emissions (metric tons per capita)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Region != "Other",]
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Year != "2019",]
+
+ggplot(data = diabetes.gdp, 
+       aes(x = `CO2 emissions (metric tons per capita)`, color = as.factor(Region),
+                                y = `Diabetes and kidney diseases, Incidence`)) + 
+  geom_point() +
+  facet_wrap(~ Year) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8,),
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8)) +
+  labs(title = "Diabetes & Kidney Disease Incidence vs. C02 Emissions by Year",
+       plot.title = element_text(hjust = 0.5), 
+       legend.title = element_text(size = 8, hjust = 0.5),
+       color ="World Bank Region"
+       )
+```
+
+```{r}
+diabetes.gdp <- getPlotData(
+  health.10p[health.10p$Cause == "Diabetes and kidney diseases, Incidence",], 
+  econ.10p[econ.10p$Series == "People using at least basic sanitation services (% of population)",])
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Region != "Other",]
+diabetes.gdp <- diabetes.gdp[diabetes.gdp$Year != "2019",]
+
+ggplot(data = diabetes.gdp, 
+       aes(x = `People using at least basic sanitation services (% of population)`, color = as.factor(Region),
+                                y = `Diabetes and kidney diseases, Incidence`)) + 
+  geom_point() +
+  facet_wrap(~ Year) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8,),
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8)) +
+  labs(title = "Diabetes & Kidney Disease Incidence and Access to Basic Sanitation",
+       plot.title = element_text(hjust = 0.5), 
+       legend.title = element_text(size = 8, hjust = 0.5),
+       color ="World Bank Region"
+       )
+```
+
+
+
+```{r}
+diabetes <- health.10p %>% 
+  filter(grepl("Diabetes", Cause)) %>% 
+  mutate(Cause = substr(Cause, start = 30, stop = length(Cause)))
+
+ggplot(data = diabetes, aes(x = as.factor(Year), y = Data, fill = Cause)) + 
+  geom_boxplot() + facet_wrap(~Cause, scales = "free") +
+  labs(title = "Diabetes and Kidney Disease Rate by Year\n", 
+       x = "\nYear", 
+       y = "Rate (in percentage)\n",
+       fill = "Metric") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8,),
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5))
+
+```
+```{r}
+diabetes
+```
+
+
+```{r}
+diabetes <- health.10p %>% 
+  filter(grepl("Diabetes", Cause), IncomeLevel != 1) %>% 
+  mutate(Cause = substr(Cause, start = 30, stop = length(Cause)),
+         IncomeLevel = trimws(IncomeLevel))
+
+ggplot(data = diabetes, 
+       aes(x = factor(IncomeLevel, level=c('Low Income', 'Lower Middle Income', 'Upper Middle Income', 'High Income')), 
+                            y = Data, fill = Cause)) + 
+  geom_boxplot() + facet_wrap(~Cause, scales = "free") +
+  labs(title = "Diabetes and Kidney Disease Rate by Year\n", 
+       x = "\nYear", 
+       y = "Rate (in percentage)\n",
+       fill = "Metric") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8,),
+    axis.text.x = element_text(size = 7, angle = 90),
+    axis.text.y = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5)
+    )
+
+```
+
+Don't forget to disconnect!
+```{r}
+dbDisconnect(db.conn)
+```
